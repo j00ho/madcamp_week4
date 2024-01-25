@@ -22,14 +22,15 @@ app.use(session({
   store: new Filestore()
 }));
 
-app.use(cors());
-// app.use(cors({
-//   origin: 'http://localhost:5173', // 클라이언트의 주소
-//   credentials: true,
-// }));
+// app.use(cors());
+app.use(cors({
+  origin: 'http://143.248.228.156:3000', // 클라이언트의 주소
+  credentials: true,
+}));
 
 app.use('/user', userRoutes);
 app.use('/contents', contentsRoutes);
+app.use('/public', express.static('public'));
 // app.use('/genre', genreRoutes);
 
 // 라우팅

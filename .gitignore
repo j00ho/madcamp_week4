@@ -157,4 +157,5 @@ sketch
 # End of https://www.toptal.com/developers/gitignore/api/node,react
 process.env
 db.js
-public/videos
+public
+sessions

@@ -5,6 +5,7 @@ const session = require('express-session');
 const db = require('./db');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
+const { exec } = require('child_process');
 
 const router = express.Router();
 const Filestore = require('session-file-store')(session);
@@ -25,6 +26,10 @@ router.use(
   })
 );
 
+ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+ffmpeg.setFfprobePath('/usr/bin/ffprobe');
+
+
 // 클라이언트가 마이페이지에서 동영상을 올리면 url을 반환하는 엔드포인트
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -38,108 +43,125 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage: storage });
-// const upload = multer({
-//   storage: storage,
-//   fileFilter: function (req, file, cb) {
-//     // 마지막 파일만 허용
-//     if (req.body && req.body.uniqueVideoUrl) {
-//       // 마지막 파일이 아닌 경우는 거부
-//       cb(new Error('Invalid request. Only the last video file is allowed.'));
-//     } else {
-//       // 허용
-//       cb(null, true);
-//     }
-//   },
-// });
 
 router.use(express.json());
 router.use('/videos', express.static(path.join(__dirname, 'public/videos'))); // 정적 파일 서비스를 위해 public/videos 경로를 라우트합니다.
 
+//video를 업로드하는 엔드포인트
 router.post('/uploadVideo', upload.single('video'), async (req, res) => {
   try {
     console.log('post 요청 들어옴');
     
     console.log('req.body:', req.body);
+    // if (!req.file) {
+    //   return res.status(400).json({ error: 'No file uploaded' });
+    // }
     // 여기에서 req.file를 사용하여 동영상 URL들을 생성
-    const videoUrl = `http://localhost:3001/contents/videos/${req.file.filename}`;
+    const videoUrl = `http://172.10.7.58:80/contents/videos/${req.file.filename}`;
     // console.log('videoUrl');
     const selectedTag = req.body.selectedTag;
     const { title, artist } = req.body;
 
     // URL을 contents_table에 저장
-    await db.execute('INSERT INTO madcamp_week4.contents_table (url, title, artist, genre) VALUES (?, ?, ?, ?)', [videoUrl, title, artist, selectedTag]);
+    await db.execute('INSERT INTO madcamp_week4.contents_table (url, title, artist, genre, thumbnail) VALUES (?, ?, ?, ?, ?)', [videoUrl, title, artist, selectedTag, '']);
     console.log(videoUrl);
 
+    // Thumbnail 생성 및 경로 저장
+    const thumbnailFilename = `${Date.now()}_thumbnail.png`;
+    const thumbnailPath = path.join(__dirname, 'public/thumbnails', thumbnailFilename);
+
+    await generateThumbnail(`public/videos/${req.file.filename}`, thumbnailPath);
+
+    const thumbnailUrl = `http://172.10.7.58:80/public/thumbnails/${thumbnailFilename}`;
+
+    // 데이터베이스 업데이트
+    await db.execute('UPDATE madcamp_week4.contents_table SET thumbnail = ? WHERE url = ?', [thumbnailUrl, videoUrl]);
+
+    console.log(videoUrl);
     const [rows] = await db.execute('SELECT contents_id FROM madcamp_week4.contents_table WHERE url = ?', [videoUrl]);
     console.log(rows);
     const contentsId = rows[0]?.contents_id;
 
-    console.log({videoUrl, contentsId: contentsId});
-    res.json({ videoUrl, contentsId: contentsId });
+    console.log({ videoUrl, contentsId: contentsId });
+    // 업로드 성공 시, 클라이언트에게 응답 데이터로 썸네일 경로 전송
+    res.json({ videoUrl, contentsId: contentsId, thumbnailPath: thumbnailPath });
   } catch (error) {
     console.error('Error uploading videos:', error);
     res.status(500).json({ error: '서버 오류' });
   }
 });
 
-// thumbnail 생성하는 엔드포인트
-router.get('/thumbnail/:contentsId', (req, res) => {
-  console.log('get 요청 들어옴');
-  const contentsId = req.params.contentsId;
-  const videoPath = path.join(__dirname, 'public/videos', `${contentsId}.mp4`);
-  const thumbnailPath = path.join(__dirname, 'public/thumbnails', `${contentsId}.png`);
+// Thumbnail 생성 함수
+async function generateThumbnail(videoPath, thumbnailPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoPath)
+      .screenshots({
+        count: 1,
+        folder: path.dirname(thumbnailPath),
+        filename: path.basename(thumbnailPath),
+        size: '400x240',
+      })
+      .on('end', () => {
+        resolve();
+      })
+      .on('error', (err) => {
+        console.error('Error creating thumbnail:', err);
+        reject(err);
+      });
+  });
+}
 
-  ffmpeg(videoPath)
-    .screenshots({
-      count: 1,
-      folder: path.dirname(thumbnailPath),
-      filename: path.basename(thumbnailPath),
-      size: '320x240',
-    })
-    .on('end', () => {
-      res.sendFile(thumbnailPath);
-    })
-    .on('error', (err) => {
-      console.error('Error creating thumbnail:', err);
-      res.status(500).send('Error creating thumbnail');
-    });
+// 유저가 저장한 컨텐츠 영상들의 썸네일들을 불러오는 엔드포인트
+router.get('/getthumbnail', upload.none(), async (req, res) => {
+  const email = req.query.email;
+  try {
+    console.log('get 요청 들어옴');
+    console.log(email);
+    // const loggedInUser = req.session.user; 
+ 
+    // 사용자가 로그인했는지 확인
+    // if (!loggedInUser) {
+    //   // 사용자가 로그인되지 않은 경우
+    //   res.status(401).json({ error: '로그인이 필요합니다.' });
+    //   return;
+    // }
+    const [row, field] = await db.execute('SELECT * FROM madcamp_week4.user_table WHERE id = ?', [email]);
+      console.log('users에서 데이터 가져감', row);
+      if(row.length === 0) {
+        console.log("해당 사용자를 찾을 수 없습니다");
+        return res.status(404).json({error: '해당 사용자를 찾을 수 없습니다'});
+      }
+
+    // 유저가 저장한 컨텐츠의 썸네일 가져오기
+    const query = `
+      SELECT uc.user_contents_id, c.thumbnail
+      FROM user_contents_table uc
+      JOIN contents_table c ON uc.contents_id = c.contents_id
+      WHERE uc.user_id = ?;
+    `;
+
+    const [rows] = await db.execute(query, [row[0].user_id]);
+    console.log(rows);
+
+    const thumbnails = rows.map((row) => ({
+      user_contents_id: row.user_contents_id,
+      thumbnail: row.thumbnail,
+    }));
+
+    res.json(thumbnails);
+  } catch (error) {
+    console.error('Error fetching thumbnails:', error);
+    res.status(500).json({ error: '서버 오류' });
+  }
 });
 
-
-
-//로그인한 사용자가 선택한 장르를 저장
-// router.post('/pickgenre', async (req, res) => {
- 
-//     try {
-//       console.log('post 요청 들어옴');
-//       const loggedInUser = req.session.user; 
-      
-//       const { genre } = req.body;
-//       // 사용자가 로그인했는지 확인
-//       if (!loggedInUser) {
-//         // 사용자가 로그인되지 않은 경우
-//         res.status(401).json({ error: '로그인이 필요합니다.' });
-//         return;
-//       }
-      
-//       await db.execute('INSERT INTO madcamp_week4.user_genre_table (fk_user_id, fk_genre_id) VALUES (?, ?)', [loggedInUser.user_id, genre]);
-//       console.log('장르 저장 완료');
-
-//       res.json({ message: '장르 선택이 완료되었습니다.' });
-
-//     } catch (error) {
-//       console.error('장르 선택 중 에러:', error);
-//       res.status(500).json({ error: '서버 오류' });
-//     }
-//   });
-
+module.exports = router;
 
 // 장르별 컨텐츠 조회
-router.get('/getgenrecontents', async (req, res) => {
- 
+router.get('/getgenrecontents', upload.none(), async (req, res) => {
+    const genre = req.query.genre;
     try {
       console.log('get 요청 들어옴');
-      const {genre} = req.body;
       const result = await db.execute('SELECT * FROM madcamp_week4.contents_table WHERE genre = ?', [genre]);
       const getContents = result[0];
 
@@ -161,21 +183,28 @@ router.get('/getgenrecontents', async (req, res) => {
   });  
 
 //로그인한 사용자가 컨텐츠 저장
-router.post('/postmycontents', async (req, res) => {
- 
+router.post('/postmycontents', upload.none(), async (req, res) => {
+    const { email, contentsId } = req.body;
     try {
       console.log('post 요청 들어옴!!!!!!');
      
-      const loggedInUser = req.session.user;
-      const { contentsId } = req.body
+      // const loggedInUser = req.session.user;
+      // const { contentsId } = req.body
 
-      if (!loggedInUser) {
-        // 사용자가 로그인되지 않은 경우
-        res.status(401).json({ error: '로그인이 필요합니다.' });
-        return;
+      // if (!loggedInUser) {
+      //   // 사용자가 로그인되지 않은 경우
+      //   res.status(401).json({ error: '로그인이 필요합니다.' });
+      //   return;
+      // }
+      const [rows, fields] = await db.execute('SELECT * FROM madcamp_week4.user_table WHERE id = ?', [email]);
+      console.log('users에서 데이터 가져감', rows);
+      if(rows.length === 0) {
+        console.log("해당 사용자를 찾을 수 없습니다");
+        return res.status(404).json({error: '해당 사용자를 찾을 수 없습니다'});
       }
-      
-      await db.execute('INSERT INTO madcamp_week4.user_contents_table (user_id, contents_id) VALUES (?, ?)', [loggedInUser.user_id, contentsId]);
+      //const user = rows[0];
+
+      await db.execute('INSERT INTO madcamp_week4.user_contents_table (user_id, contents_id) VALUES (?, ?)', [rows[0].user_id, contentsId]);
 
       console.log('컨텐츠 저장 완료');
     //   const selectResult = await db.execute('SELECT * FROM madcamp_week4.user_contents_table WHERE user_id = ? AND contents_id = ?', [loggedInUserId, contentsId]);
